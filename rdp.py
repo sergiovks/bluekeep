@@ -4,8 +4,11 @@ import random
 import struct
 import time
 
-from OpenSSL import *
+
 from Crypto.PublicKey.RSA import construct
+
+from Crypto.Util.number import bytes_to_long, long_to_bytes
+
 
 import rdp_crypto
 
@@ -98,37 +101,40 @@ def parse_mcs_conn_resp(packet):
 
     return crypt
 
+def raw_rsa_encrypt(pubkey, message):
+    m = bytes_to_long(message)
+    c = pow(m, pubkey.e, pubkey.n)
+    # Ajustamos tamaño a la longitud de la clave en bytes
+    return long_to_bytes(c, pubkey.size_in_bytes())
+
 # the securty exchange (send our client random encrypted with servers pub RSA key)
 
 def sec_exchange(pubkey, bit_len):
-
     # https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/ca73831d-3661-4700-9357-8f247640c02e
     # 5.3.4.1 Encrypting Client Random
-    # https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/761e2583-6406-4a71-bfec-cca52294c099
 
-    tpkt = binascii.unhexlify('0300') # still require two bytes for size
-
+    tpkt = binascii.unhexlify('0300')  # 2 bytes para tamaño, se añadirá más abajo
     mcs_pdu = binascii.unhexlify('02f08064000503eb70')
 
-    enc_client_ran = pubkey.encrypt(b'A'*32, None)[0]
+    client_random = b'A' * 32  # 32 bytes obligatorios para protocolo
+    enc_client_ran = raw_rsa_encrypt(pubkey, client_random)
 
-    # reverse for little endian
+    # El protocolo requiere que el resultado esté en little endian, así que invertimos bytes
     enc_client_ran = enc_client_ran[::-1]
-    enc_client_ran = enc_client_ran.ljust(int((bit_len/8)+8), b'\x00')
-    sec_exchange_len = struct.pack('<I', len(enc_client_ran))
+    # Padding con ceros para completar la longitud (bit_len en bits, /8 para bytes +8 extra)
+    enc_client_ran = enc_client_ran.ljust(int((bit_len / 8) + 8), b'\x00')
 
-    sec_flags = binascii.unhexlify('01000000') #48000000')
+    sec_exchange_len = struct.pack('<I', len(enc_client_ran))
+    sec_flags = binascii.unhexlify('01000000')
 
     sec_exchange_pdu = sec_flags + sec_exchange_len + enc_client_ran
 
-    mcs_pdu_size = struct.pack('>H', len(sec_exchange_pdu)+0x8000)
+    mcs_pdu_size = struct.pack('>H', len(sec_exchange_pdu) + 0x8000)
     mcs_pdu += mcs_pdu_size
-
 
     to_send = mcs_pdu + sec_exchange_pdu
 
-    #add 4 for tpkt hdr/size
-    total_size = len(to_send) + 4
+    total_size = len(to_send) + 4  # 4 bytes header TPKT
     tpkt += struct.pack('>H', total_size) + to_send
 
     return tpkt
